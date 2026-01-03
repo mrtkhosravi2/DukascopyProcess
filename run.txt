@@ -1,0 +1,5 @@
+mvn clean package
+
+java -jar target/dukascopy-process-1.0-SNAPSHOT.jar
+
+java -cp target/classes com.dukascopy.CsvComparator "processed-data/EURUSD-2025-09.csv" "D:\DL\Dukascopy\1 month\processed-data\EURUSD_S1.csv"
