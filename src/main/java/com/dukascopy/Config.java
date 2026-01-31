@@ -18,6 +18,12 @@ public class Config {
     private final boolean startupDownloadEnabled;
     private final int startupDownloadWindowMinutes;
 
+    // Live data settings
+    private final String appMode;
+    private final int[] liveTimeframes;
+    private final int lookbackWindow;
+    private final int livePort;
+
     public Config(String configPath) throws Exception {
         Map<String, String> props = new HashMap<>();
         try (BufferedReader reader = new BufferedReader(new FileReader(configPath))) {
@@ -58,6 +64,12 @@ public class Config {
         startupDownloadWindowMinutes = Integer.parseInt(
             props.getOrDefault("download.startup_download_window_minutes", "120")
         );
+
+        // Live data settings
+        appMode = props.getOrDefault("app.mode", "historical");
+        liveTimeframes = parseTimeframes(props.getOrDefault("live.timeframes", "1, 5, 10, 30, 60, 180, 900, 3600"));
+        lookbackWindow = Integer.parseInt(props.getOrDefault("live.lookback_window", "64"));
+        livePort = Integer.parseInt(props.getOrDefault("live.port", "80543"));
     }
 
     private String getRequired(Map<String, String> props, String key) throws Exception {
@@ -78,6 +90,18 @@ public class Config {
             }
         }
         return result;
+    }
+
+    private int[] parseTimeframes(String timeframesStr) {
+        String[] parts = timeframesStr.split(",");
+        List<Integer> result = new ArrayList<>();
+        for (String part : parts) {
+            String trimmed = part.trim();
+            if (!trimmed.isEmpty()) {
+                result.add(Integer.parseInt(trimmed));
+            }
+        }
+        return result.stream().mapToInt(Integer::intValue).toArray();
     }
 
     public String getUsername() {
@@ -110,5 +134,29 @@ public class Config {
 
     public int getStartupDownloadWindowMinutes() {
         return startupDownloadWindowMinutes;
+    }
+
+    public String getAppMode() {
+        return appMode;
+    }
+
+    public int[] getLiveTimeframes() {
+        return liveTimeframes;
+    }
+
+    public int getLookbackWindow() {
+        return lookbackWindow;
+    }
+
+    public int getLivePort() {
+        return livePort;
+    }
+
+    public boolean isLiveEnabled() {
+        return "live".equalsIgnoreCase(appMode) || "both".equalsIgnoreCase(appMode);
+    }
+
+    public boolean isHistoricalEnabled() {
+        return "historical".equalsIgnoreCase(appMode) || "both".equalsIgnoreCase(appMode);
     }
 }

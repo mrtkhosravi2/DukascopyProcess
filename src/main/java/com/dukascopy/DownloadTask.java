@@ -5,7 +5,6 @@ import com.dukascopy.api.Instrument;
 
 import java.time.YearMonth;
 import java.util.Date;
-import java.util.List;
 
 public class DownloadTask {
     private final IHistory history;

@@ -1,0 +1,34 @@
+  currently we do download historical data from dukascopy. now we want to add live data support. the app gets data from dukascopy and exposes web services so that other local apps can access the data from our app.    
+  data is provided as timeframes like S1, S5, etc. these timeframes are averaged values for the relative timespan; for example each 5 sec we will have a new value for S5. we'll have lookback_window latest values for    
+  each timeframe. default number of lookback_window is 64 (see d:\Github\DukascopyProcess\config.ini for timeframes and lookback_window). so at any time we'll have lookback_window (64 by default) latest values for      
+  each time frame (S1, S5, S10, etc.).                                                                                                                                                                                     
+  obviously at the start of the app, some historical data should be collected to fill the values needed for timeframes, which can be huge (like 64 * 3600 for H1 data).                                                    
+  each timeframe is devisible to previous timeframe. it is an invariant of our system. for example S5 is 5 times S1, S10 is two times S5. so we could easily aggregate timeframe data hierarchically, starting from S1     
+  and moving upward.                                                                                                                                                                                                       
+  timeframes are aligned by hour. for example S5 values should be aligned by the hour an we will always have a datapoint at xx:00:00, xx:00:05, etc. but will never have xx:00:03. Also another invariant of our system    
+  is that timeframes can never be bigger than H1, so H2 , H3, etc. timeframes are forbidden.                                                                                                                               
+  now let's talk about how timeframes are defined and calculated:                                                                                                                                                          
+  1. S1 data is calculated from tick data. if there is no tick for a certain second, value is forward-filed from last valid tick data.                                                                                     
+  2. S5 is calculated by averaging five S1 datapoints. it starts from a second divisible by 5. for example 04:27:05 to 04:27:09 (inclusive), 16:32:55 to 16:32:59, 11:43:20 to 11:43:24.                                   
+  3. S10 is calculated by averaging to S5 values. for example with S5 data of 07:23:20 and 07:23:25 we can calc S10 for 07:23:20.                                                                                          
+  4. higher timerfames are calculated the same way.                                                                                                                                                                        
+  5. at all times, the app should expose lookback_window values per timeframes.                                                                                                                                                                                               
+                                                                                                                                                                                                                           
+  the connection is atrocious so disconnections may happen and handling these is important.                                                                                                                                                                                                           
+  there is an important point about connection loss. when connection is lost, the new seconds will be NaN, not forward-filled from last valid point. higher timeframes related to these nan values will    
+  also be nan obviously and these nan values propagate upward. so when nan values in S1 happen then new S5 values will become nan. new S10, S30, and higher also will be nan. downstream apps have no use  
+  for incomplete data, so the web service responce should replace connection status with NaN existence in the buffer.                                                                                      
+  on reconnection, app should fetch the missing data so that these nan values are replaced with actual values.                                                                                             
+  for holidays there should be no values. the app should skip the whole day. so the first second is continued from 23:59:59 of the last open market day. closed market days other than weekends can be     
+  identified by not having any tick between 00:00:00 and 02:00:00. so let's say we are in a close market day. if we have no tick in the span of 00:00:00 and 02:00:00, then this is a close market day. so we will   
+  remove any data point we added for the current hour, essentially going back to the buffer at the start of the day. it makes sense to copy a backup of the buffer in case we need to revert the changes. 
+  we make a flag named closeMarketDay as true and do not fetch data for the whole day.  
+  data retrieval will resume on 00:00:00 of the next day. so in essence at the start of the day the flag will become on if it is a weekend. otherwise it will become off. 
+  at 02:00:00 if there was no tick from the start of the day, the flage will be set as on. when the flage is on, no attempt to fetch the data is performed.
+
+  Note: in production, our app should have both the current historical download functionality and the new live data exposure functionality we are going to develop. we should have a config to determine if only one of     
+  these two should be run or both.                                                                                                                                                                                         
+  note: only S1 timeframe has both mid price and spread values. other timeframes have only mid price.                                                                                                                      
+  note: all timezone are in eet.                                                                                                                                                                                           
+  we are talking about specs. don't jump into implementation. 
+                                                                                                                                                                                       

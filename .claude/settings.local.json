@@ -5,7 +5,12 @@
       "WebSearch",
       "WebFetch(domain:www.dukascopy.com)",
       "Bash(mvn clean compile:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(git -C \"D:\\\\Github\\\\DukascopyProcess\" diff)",
+      "Bash(git -C \"D:\\\\Github\\\\DukascopyProcess\" log --oneline -5)",
+      "Bash(git -C \"D:\\\\Github\\\\DukascopyProcess\" add CLAUDE.md)",
+      "Bash(git -C \"D:\\\\Github\\\\DukascopyProcess\" commit -m \"$\\(cat <<''EOF''\nAdd CLAUDE.md for Claude Code guidance\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git -C \"D:\\\\Github\\\\DukascopyProcess\" status)"
     ]
   }
 }

@@ -1,0 +1,1 @@
+java -jar target/dukascopy-process-1.0-SNAPSHOT.jar

@@ -92,9 +92,10 @@ public class MonthProcessor {
     private long getMonthEndMillis() {
         ZonedDateTime end = yearMonth.plusMonths(1).atDay(1).atStartOfDay(ZoneId.of("EET"));
         long endMillis = end.toInstant().toEpochMilli();
-        // Subtract 5 minute buffer to account for data availability delays
-        long now = System.currentTimeMillis() - (5 * 60 * 1000);
-        return Math.min(endMillis, now);
+        // Cap at start of today (exclude today's data)
+        ZonedDateTime todayStart = ZonedDateTime.now(ZoneId.of("EET")).toLocalDate().atStartOfDay(ZoneId.of("EET"));
+        long todayStartMillis = todayStart.toInstant().toEpochMilli();
+        return Math.min(endMillis, todayStartMillis);
     }
 
     private Map<Long, TickAggregator.AggregatedData> fillGaps(
@@ -135,7 +136,14 @@ public class MonthProcessor {
             lastTimestamp = timestamp;
         }
 
-        // 3. Remove days with only one value (no changes)
+        // 3. Forward fill from last tick to end of month
+        if (lastData != null) {
+            for (long sec = lastTimestamp + 1; sec < monthEndSec; sec++) {
+                filled.put(sec, lastData);
+            }
+        }
+
+        // 4. Remove days with only one value (no changes)
         return removeFlatDays(filled);
     }
 

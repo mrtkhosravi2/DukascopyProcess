@@ -3,12 +3,17 @@ package com.dukascopy;
 import com.dukascopy.api.IContext;
 import com.dukascopy.api.IHistory;
 import com.dukascopy.api.Instrument;
+import com.dukascopy.api.ITick;
 import com.dukascopy.api.system.IClient;
 import com.dukascopy.api.system.ClientFactory;
 import com.dukascopy.api.system.ISystemListener;
+import com.dukascopy.live.LiveDataManager;
+import com.dukascopy.live.LiveWebServer;
 
+import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
+import java.util.List;
 import java.util.TimeZone;
 import java.util.Timer;
 import java.util.TimerTask;
@@ -17,6 +22,9 @@ public class Main {
     private static IClient client;
     private static Config config;
     private static volatile IContext context;
+    private static LiveDataManager liveDataManager;
+    private static LiveWebServer liveWebServer;
+    private static List<Instrument> subscribedInstruments = new ArrayList<>();
 
     public static void main(String[] args) {
         try {
@@ -60,19 +68,44 @@ public class Main {
             System.out.println("[" + new Date() + "] Strategy started, context available");
 
             IHistory history = context.getHistory();
-            DownloadTask downloadTask = new DownloadTask(history, config);
 
-            if (config.isStartupDownloadEnabled()) {
-                System.out.println("[" + new Date() + "] Performing startup download...");
-                long windowDurationMillis = config.getStartupDownloadWindowMinutes() * 60 * 1000L;
-                long startupWindowEnd = System.currentTimeMillis() + windowDurationMillis;
-                downloadTask.execute(startupWindowEnd);
-                System.out.println("[" + new Date() + "] Startup download complete");
+            // Start live data service if enabled
+            if (config.isLiveEnabled()) {
+                System.out.println("[" + new Date() + "] Starting live data service...");
+                liveDataManager = new LiveDataManager(config, history, subscribedInstruments);
+                liveDataManager.start();
+
+                liveWebServer = new LiveWebServer(liveDataManager, config.getLivePort());
+                liveWebServer.start();
+                System.out.println("[" + new Date() + "] Live data service started on port " + config.getLivePort());
             }
 
-            scheduleDaily(downloadTask);
+            // Historical download tasks
+            if (config.isHistoricalEnabled()) {
+                DownloadTask downloadTask = new DownloadTask(history, config);
 
-            System.out.println("[" + new Date() + "] Scheduler started. Waiting for daily download window (00:10-00:40 EET)...");
+                if (config.isStartupDownloadEnabled()) {
+                    System.out.println("[" + new Date() + "] Performing startup download...");
+                    long windowDurationMillis = config.getStartupDownloadWindowMinutes() * 60 * 1000L;
+                    long startupWindowEnd = System.currentTimeMillis() + windowDurationMillis;
+                    downloadTask.execute(startupWindowEnd);
+                    System.out.println("[" + new Date() + "] Startup download complete");
+                }
+
+                scheduleDaily(downloadTask);
+                System.out.println("[" + new Date() + "] Scheduler started. Waiting for daily download window (00:10-00:40 EET)...");
+            }
+
+            // Add shutdown hook
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                System.out.println("[" + new Date() + "] Shutting down...");
+                if (liveWebServer != null) {
+                    liveWebServer.stop();
+                }
+                if (liveDataManager != null) {
+                    liveDataManager.shutdown();
+                }
+            }, "ShutdownHook"));
 
             Thread.currentThread().join();
 
@@ -128,6 +161,9 @@ public class Main {
         @Override
         public void onDisconnect() {
             System.err.println("[" + new Date() + "] Disconnected");
+            if (liveDataManager != null) {
+                liveDataManager.onDisconnect();
+            }
         }
     }
 
@@ -150,6 +186,7 @@ public class Main {
 
             if (!instruments.isEmpty()) {
                 ctx.setSubscribedInstruments(instruments, true);
+                subscribedInstruments.addAll(instruments);
                 System.out.println("[" + new Date() + "] Subscribed to instruments: " + instruments);
             }
 
@@ -158,6 +195,9 @@ public class Main {
 
         @Override
         public void onTick(com.dukascopy.api.Instrument instrument, com.dukascopy.api.ITick tick) {
+            if (liveDataManager != null) {
+                liveDataManager.onTick(instrument, tick);
+            }
         }
 
         @Override
