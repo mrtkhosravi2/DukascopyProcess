@@ -164,6 +164,15 @@ public class TimeframeBuffer {
         }
     }
 
+    public long[] getTimestamps() {
+        lock.readLock().lock();
+        try {
+            return midBuffer.getTimestamps();
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
     public double[] getSpreadValues() {
         lock.readLock().lock();
         try {

@@ -80,8 +80,9 @@ public class InstrumentBuffer {
         for (TimeframeType tf : TimeframeType.values()) {
             TimeframeBuffer buffer = buffers.get(tf);
             if (buffer != null) {
-                Map<String, double[]> tfData = new LinkedHashMap<>();
+                Map<String, Object> tfData = new LinkedHashMap<>();
                 tfData.put("mid", buffer.getMidValues());
+                tfData.put("ts", buffer.getTimestamps());
                 if (tf.hasSpread()) {
                     double[] spreadValues = buffer.getSpreadValues();
                     if (spreadValues != null) {
