@@ -67,7 +67,7 @@ public class Config {
 
         // Live data settings
         appMode = props.getOrDefault("app.mode", "historical");
-        liveTimeframes = parseTimeframes(props.getOrDefault("live.timeframes", "1, 5, 10, 30, 60, 180, 900, 3600"));
+        liveTimeframes = parseTimeframes(props.getOrDefault("live.timeframes", "1, 5, 10, 30, 60, 180, 900"));
         lookbackWindow = Integer.parseInt(props.getOrDefault("live.lookback_window", "64"));
         livePort = Integer.parseInt(props.getOrDefault("live.port", "8443"));
     }

@@ -1,18 +1,22 @@
 package com.dukascopy.live;
 
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.TimeZone;
 
+/**
+ * Holds all timeframe buffers for a single instrument.
+ */
 public class InstrumentBuffer {
     private final String instrumentName;
     private final Map<TimeframeType, TimeframeBuffer> buffers;
-    private final int[] enabledTimeframes;
     private final int capacity;
 
     public InstrumentBuffer(String instrumentName, int[] enabledTimeframes, int capacity) {
         this.instrumentName = instrumentName;
-        this.enabledTimeframes = enabledTimeframes;
         this.capacity = capacity;
         this.buffers = new EnumMap<>(TimeframeType.class);
 
@@ -24,56 +28,47 @@ public class InstrumentBuffer {
         }
     }
 
-    public void processTick(long epochSecond, double mid, double spread) {
-        TimeframeBuffer s1Buffer = buffers.get(TimeframeType.S1);
-        if (s1Buffer != null) {
-            s1Buffer.addTick(epochSecond, mid, spread);
-        }
+    /**
+     * Get the buffer for a specific timeframe.
+     */
+    public TimeframeBuffer getBuffer(TimeframeType timeframe) {
+        return buffers.get(timeframe);
     }
 
-    public void finalizeSecond(long epochSecond) {
-        TimeframeBuffer s1Buffer = buffers.get(TimeframeType.S1);
-        if (s1Buffer != null && s1Buffer.hasPendingData()) {
-            double avgMid = s1Buffer.finalizePeriod();
-            if (avgMid != -1.0) {
-                propagateToHigherTimeframes(epochSecond, avgMid);
-            }
-        }
+    /**
+     * Check if a timeframe is enabled.
+     */
+    public boolean hasTimeframe(TimeframeType timeframe) {
+        return buffers.containsKey(timeframe);
     }
 
-    private void propagateToHigherTimeframes(long epochSecond, double mid) {
-        for (TimeframeType tf : TimeframeType.values()) {
-            if (tf == TimeframeType.S1) continue;
-            TimeframeBuffer buffer = buffers.get(tf);
-            if (buffer != null) {
-                buffer.addAggregatedValue(epochSecond, mid);
-            }
-        }
+    /**
+     * Get all enabled timeframes.
+     */
+    public TimeframeType[] getEnabledTimeframes() {
+        return buffers.keySet().toArray(new TimeframeType[0]);
     }
 
-    public void addHistoricalTick(long epochSecond, double mid, double spread) {
-        TimeframeBuffer s1Buffer = buffers.get(TimeframeType.S1);
-        if (s1Buffer != null) {
-            s1Buffer.addDirectValue(epochSecond, mid, spread);
-        }
-
-        for (TimeframeType tf : TimeframeType.values()) {
-            if (tf == TimeframeType.S1) continue;
-            TimeframeBuffer buffer = buffers.get(tf);
-            if (buffer != null) {
-                buffer.addAggregatedValue(epochSecond, mid);
-            }
-        }
+    public String getInstrumentName() {
+        return instrumentName;
     }
 
-    public void finalizeAllPeriods() {
+    public int getCapacity() {
+        return capacity;
+    }
+
+    /**
+     * Clear all buffers.
+     */
+    public void clear() {
         for (TimeframeBuffer buffer : buffers.values()) {
-            if (buffer.hasPendingData()) {
-                buffer.finalizePeriod();
-            }
+            buffer.clear();
         }
     }
 
+    /**
+     * Convert to JSON-serializable map.
+     */
     public Map<String, Object> toJsonMap() {
         Map<String, Object> result = new LinkedHashMap<>();
 
@@ -82,7 +77,7 @@ public class InstrumentBuffer {
             if (buffer != null) {
                 Map<String, Object> tfData = new LinkedHashMap<>();
                 tfData.put("mid", buffer.getMidValues());
-                tfData.put("ts", buffer.getTimestamps());
+                tfData.put("ts", formatTimestamps(buffer.getTimestamps()));
                 if (tf.hasSpread()) {
                     double[] spreadValues = buffer.getSpreadValues();
                     if (spreadValues != null) {
@@ -96,17 +91,21 @@ public class InstrumentBuffer {
         return result;
     }
 
-    public TimeframeBuffer getBuffer(TimeframeType timeframe) {
-        return buffers.get(timeframe);
-    }
+    /**
+     * Format epoch seconds array to string array in "yyyy.MM.dd HH:mm:ss" EET format.
+     */
+    private String[] formatTimestamps(long[] epochSeconds) {
+        SimpleDateFormat sdf = new SimpleDateFormat("yyyy.MM.dd HH:mm:ss");
+        sdf.setTimeZone(TimeZone.getTimeZone("EET"));
 
-    public String getInstrumentName() {
-        return instrumentName;
-    }
-
-    public void clear() {
-        for (TimeframeBuffer buffer : buffers.values()) {
-            buffer.clear();
+        String[] result = new String[epochSeconds.length];
+        for (int i = 0; i < epochSeconds.length; i++) {
+            if (epochSeconds[i] > 0) {
+                result[i] = sdf.format(new Date(epochSeconds[i] * 1000));
+            } else {
+                result[i] = null;
+            }
         }
+        return result;
     }
 }

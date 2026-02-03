@@ -32,3 +32,288 @@
   note: all timezone are in eet.                                                                                                                                                                                           
   we are talking about specs. don't jump into implementation. 
                                                                                                                                                                                        
+
+
+  ---                                                                                                                                                                                                        Live Data Warmup Specification
+                                                                                                                                                                                                           
+  1. Configuration Parameters
+  ┌────────────────────────┬────────────────────────────┬───────────────────────────────────────────────────────────────────────┐
+  │       Parameter        │           Value            │                              Description                              │
+  ├────────────────────────┼────────────────────────────┼───────────────────────────────────────────────────────────────────────┤
+  │ timeframes             │ 1, 5, 10, 30, 60, 180, 900 │ Timeframe sizes in seconds                                            │
+  ├────────────────────────┼────────────────────────────┼───────────────────────────────────────────────────────────────────────┤
+  │ lookback_window        │ 64                         │ Number of datapoints to keep per timeframe                            │
+  ├────────────────────────┼────────────────────────────┼───────────────────────────────────────────────────────────────────────┤
+  │ largest_timeframe_secs │ 900 (M15)                  │ Largest configured timeframe                                          │
+  ├────────────────────────┼────────────────────────────┼───────────────────────────────────────────────────────────────────────┤
+  │ required_valid_hours   │ 17                         │ lookback_window // (3600 // largest_timeframe_secs) + 1 = 64 // 4 + 1 │
+  └────────────────────────┴────────────────────────────┴───────────────────────────────────────────────────────────────────────┘
+  ---
+  2. Hour-by-Hour Tick Fetching
+
+  2.1 Overview
+
+  Fetch historical ticks starting from the current partial hour, then proceeding backwards hour-by-hour until 17 valid hours are accumulated.
+
+  2.2 Definitions
+
+  - Current hour: The EET hour when warmup started (e.g., if started at 05:23:32 EET, current hour = 05)
+  - Valid hour: An hour that counts toward the 17-hour requirement
+  - Tick range for hour H:
+    - If H == current hour: [H:00:00, now - 1 second] (e.g., 05:00:00 to 05:23:31)
+    - If H < current hour: [H:00:00, H:59:59] (full hour)
+
+  2.3 Hour Validity Rules
+  ┌─────────────────┬─────────────────────────────────────────────────────────────────────────────────┐
+  │    Hour Type    │                               Validity Condition                                │
+  ├─────────────────┼─────────────────────────────────────────────────────────────────────────────────┤
+  │ Current hour    │ Valid if: (a) it has ≥1 tick, OR (b) the immediately preceding hour has ≥1 tick │
+  ├─────────────────┼─────────────────────────────────────────────────────────────────────────────────┤
+  │ All other hours │ Valid if: it has ≥1 tick                                                        │
+  └─────────────────┴─────────────────────────────────────────────────────────────────────────────────┘
+  Example scenario (starting at 05:23:32 EET):
+  ┌──────────────┬────────────┬────────┬────────────────────────────┐
+  │     Hour     │ Has Ticks? │ Valid? │           Reason           │
+  ├──────────────┼────────────┼────────┼────────────────────────────┤
+  │ 05 (current) │ No         │ Yes    │ Hour 04 has ticks          │
+  ├──────────────┼────────────┼────────┼────────────────────────────┤
+  │ 04           │ Yes        │ Yes    │ Has ticks                  │
+  ├──────────────┼────────────┼────────┼────────────────────────────┤
+  │ 03           │ No         │ No     │ No ticks, not current hour │
+  ├──────────────┼────────────┼────────┼────────────────────────────┤
+  │ 02           │ Yes        │ Yes    │ Has ticks                  │
+  └──────────────┴────────────┴────────┴────────────────────────────┘
+  2.4 Fetching Algorithm
+
+  valid_hour_count = 0
+  current_time = now()
+  current_hour = floor(current_time to hour boundary)
+  all_ticks = []
+  hour_validity_map = {}
+
+  # First pass: fetch ticks and determine raw tick presence
+  hour = current_hour
+  while valid_hour_count < 17:
+      if hour == current_hour:
+          start = hour:00:00
+          end = current_time - 1 second
+      else:
+          start = hour:00:00
+          end = hour:59:59
+
+      ticks = fetch_ticks(start, end)
+      hour_has_ticks = len(ticks) > 0
+      hour_validity_map[hour] = hour_has_ticks
+
+      if hour_has_ticks:
+          all_ticks.append(ticks)
+
+      # Determine if this hour is valid
+      if hour == current_hour:
+          # Current hour: valid if has ticks OR previous hour has ticks
+          # (previous hour validity determined after fetching it)
+          is_valid = hour_has_ticks  # tentative, may upgrade later
+      else:
+          is_valid = hour_has_ticks
+
+          # Check if we need to upgrade current hour validity
+          if hour == current_hour - 1 hour AND hour_has_ticks:
+              if NOT hour_validity_map[current_hour]:
+                  # Upgrade current hour to valid
+                  valid_hour_count += 1  # retroactively count current hour
+
+      if is_valid:
+          valid_hour_count += 1
+
+      hour = hour - 1 hour
+
+  2.5 Output of Step 2
+
+  - all_ticks[]: Array of tick data for all fetched hours (including invalid hours)
+  - valid_hours[]: Set of hour timestamps that are considered valid
+  - Count: exactly 17 valid hours
+
+  ---
+  3. S1 Data Generation
+
+  3.1 Overview
+
+  Convert raw ticks into per-second (S1) datapoints. Each second has exactly one datapoint.
+
+  3.2 Algorithm
+
+  Phase A: Generate S1 for ALL fetched hours (including invalid)
+
+  For each fetched hour:
+  for second in [hour:00:00 to hour:59:59]:  # 3600 seconds
+      ticks_in_second = filter(all_ticks, timestamp == second)
+
+      if len(ticks_in_second) > 0:
+          s1_mid = average(tick.mid for tick in ticks_in_second)
+          s1_spread = average(tick.spread for tick in ticks_in_second)
+      else:
+          s1_mid = previous_second.mid      # forward-fill
+          s1_spread = previous_second.spread
+
+      s1_data[second] = {mid: s1_mid, spread: s1_spread}
+
+  Note on forward-fill edge case: For the very first second of the earliest fetched hour, if no tick exists, use the first available tick value from later in that hour (or subsequent hours).
+
+  Phase B: Remove S1 data for invalid hours
+
+  for hour in all_fetched_hours:
+      if hour NOT in valid_hours:
+          remove s1_data[hour:00:00 to hour:59:59]
+
+  3.3 Output of Step 3
+
+  - s1_data[]: Array of S1 datapoints
+  - Each valid hour contributes exactly 3600 S1 datapoints
+  - Total S1 datapoints = 17 × 3600 = 61,200 datapoints
+  - Invalid hours have 0 S1 datapoints
+
+  ---
+  4. Higher Timeframe Calculation
+
+  4.1 Timeframe Hierarchy
+  ┌───────────┬─────────┬────────┬───────┬─────────────────┐
+  │ Timeframe │ Seconds │ Parent │ Ratio │ Datapoints/Hour │
+  ├───────────┼─────────┼────────┼───────┼─────────────────┤
+  │ S1        │ 1       │ —      │ —     │ 3600            │
+  ├───────────┼─────────┼────────┼───────┼─────────────────┤
+  │ S5        │ 5       │ S1     │ 5     │ 720             │
+  ├───────────┼─────────┼────────┼───────┼─────────────────┤
+  │ S10       │ 10      │ S5     │ 2     │ 360             │
+  ├───────────┼─────────┼────────┼───────┼─────────────────┤
+  │ S30       │ 30      │ S10    │ 3     │ 120             │
+  ├───────────┼─────────┼────────┼───────┼─────────────────┤
+  │ M1        │ 60      │ S30    │ 2     │ 60              │
+  ├───────────┼─────────┼────────┼───────┼─────────────────┤
+  │ M3        │ 180     │ M1     │ 3     │ 20              │
+  ├───────────┼─────────┼────────┼───────┼─────────────────┤
+  │ M15       │ 900     │ M3     │ 5     │ 4               │
+  └───────────┴─────────┴────────┴───────┴─────────────────┘
+  4.2 Alignment Rule
+
+  All higher timeframes are hour-aligned. Every hour boundary (HH:00:00) is always a datapoint for all timeframes.
+
+  Examples for hour 05:
+  - S5: 05:00:00, 05:00:05, 05:00:10, ..., 05:59:55
+  - S10: 05:00:00, 05:00:10, 05:00:20, ..., 05:59:50
+  - S30: 05:00:00, 05:00:30, 05:01:00, ..., 05:59:30
+  - M1: 05:00:00, 05:01:00, 05:02:00, ..., 05:59:00
+  - M3: 05:00:00, 05:03:00, 05:06:00, ..., 05:57:00
+  - M15: 05:00:00, 05:15:00, 05:30:00, 05:45:00
+
+  4.3 Calculation Algorithm
+
+  Each higher timeframe is calculated exclusively from its parent timeframe:
+
+  for timeframe in [S5, S10, S30, M1, M3, M15]:  # in order
+      parent = timeframe.getParent()
+      ratio = timeframe.seconds / parent.seconds
+
+      for each valid_hour:
+          for period_start in [hour:00:00, step by timeframe.seconds]:
+              parent_values = get_parent_values(
+                  parent_data,
+                  period_start,
+                  period_start + timeframe.seconds - 1
+              )
+              # parent_values contains exactly `ratio` values
+
+              timeframe_data[period_start] = average(parent_values)
+
+  Example: S5 at 05:00:00
+  S5[05:00:00] = average(S1[05:00:00], S1[05:00:01], S1[05:00:02], S1[05:00:03], S1[05:00:04])
+
+  Example: S10 at 05:00:00
+  S10[05:00:00] = average(S5[05:00:00], S5[05:00:05])
+
+  Example: M15 at 05:00:00
+  M15[05:00:00] = average(M3[05:00:00], M3[05:03:00], M3[05:06:00], M3[05:09:00], M3[05:12:00])
+
+  4.4 Invalid Hour Handling
+
+  Higher timeframes skip invalid hours entirely. If an hour is invalid:
+  - No datapoints are generated for that hour
+  - The calculation continues with the next valid hour's data
+
+  ---
+  5. Ring Buffer Population
+
+  5.1 Overview
+
+  After all timeframe data is calculated, populate the ring buffers with the last lookback_window (64) datapoints for each timeframe.
+
+  5.2 Buffer Sizes
+  ┌───────────┬───────────────────────┬──────────────────┬─────────────┐
+  │ Timeframe │ Datapoints/Valid Hour │ Total (17 hours) │ Buffer Size │
+  ├───────────┼───────────────────────┼──────────────────┼─────────────┤
+  │ S1        │ 3600                  │ 61,200           │ 64          │
+  ├───────────┼───────────────────────┼──────────────────┼─────────────┤
+  │ S5        │ 720                   │ 12,240           │ 64          │
+  ├───────────┼───────────────────────┼──────────────────┼─────────────┤
+  │ S10       │ 360                   │ 6,120            │ 64          │
+  ├───────────┼───────────────────────┼──────────────────┼─────────────┤
+  │ S30       │ 120                   │ 2,040            │ 64          │
+  ├───────────┼───────────────────────┼──────────────────┼─────────────┤
+  │ M1        │ 60                    │ 1,020            │ 64          │
+  ├───────────┼───────────────────────┼──────────────────┼─────────────┤
+  │ M3        │ 20                    │ 340              │ 64          │
+  ├───────────┼───────────────────────┼──────────────────┼─────────────┤
+  │ M15       │ 4                     │ 68               │ 64          │
+  └───────────┴───────────────────────┴──────────────────┴─────────────┘
+  5.3 Population Algorithm
+
+  for each instrument:
+      for each timeframe:
+          sorted_data = sort_by_timestamp(timeframe_data)
+          last_64 = sorted_data[-64:]  # take last 64 datapoints
+
+          ring_buffer[instrument][timeframe].populate(last_64)
+
+  ---
+  6. Edge Cases & Constraints
+  ┌──────────────────────────────────────────────┬───────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │                   Scenario                   │                                             Handling                                              │
+  ├──────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Market closed (weekend/holiday)              │ Keep fetching backwards until 17 valid hours found                                                │
+  ├──────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Current hour is first hour after market open │ If current hour has no ticks but previous valid market hour has ticks, current hour becomes valid │
+  ├──────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Gap between valid hours                      │ Invalid hours are skipped; no interpolation                                                       │
+  ├──────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Very old data needed                         │ Continue fetching as far back as necessary                                                        │
+  ├──────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Current partial hour has <1 second elapsed   │ Fetch 0 ticks for current hour; validity depends on previous hour                                 │
+  └──────────────────────────────────────────────┴───────────────────────────────────────────────────────────────────────────────────────────────────┘
+  ---
+  7. Data Flow Summary
+
+  ┌─────────────────┐
+  │  Fetch Ticks    │  Hour-by-hour until 17 valid hours
+  │  (Step 2)       │
+  └────────┬────────┘
+           │ Raw ticks + valid_hours[]
+           ▼
+  ┌─────────────────┐
+  │  Generate S1    │  3600 datapoints per valid hour
+  │  (Step 3)       │  Forward-fill gaps
+  └────────┬────────┘
+           │ S1 data (valid hours only)
+           ▼
+  ┌─────────────────┐
+  │  Calculate      │  S5 ← S1, S10 ← S5, ... M15 ← M3
+  │  Timeframes     │  All hour-aligned
+  │  (Step 4)       │
+  └────────┬────────┘
+           │ All timeframe data
+           ▼
+  ┌─────────────────┐
+  │  Populate       │  Last 64 datapoints per timeframe
+  │  Ring Buffers   │
+  │  (Step 5)       │
+  └─────────────────┘
+
+

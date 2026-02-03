@@ -3,12 +3,11 @@ package com.dukascopy;
 import com.dukascopy.api.IContext;
 import com.dukascopy.api.IHistory;
 import com.dukascopy.api.Instrument;
-import com.dukascopy.api.ITick;
 import com.dukascopy.api.system.IClient;
 import com.dukascopy.api.system.ClientFactory;
 import com.dukascopy.api.system.ISystemListener;
-import com.dukascopy.live.LiveDataManager;
 import com.dukascopy.live.LiveWebServer;
+import com.dukascopy.live.WarmupManager;
 
 import java.util.ArrayList;
 import java.util.Calendar;
@@ -22,9 +21,9 @@ public class Main {
     private static IClient client;
     private static Config config;
     private static volatile IContext context;
-    private static LiveDataManager liveDataManager;
-    private static LiveWebServer liveWebServer;
     private static List<Instrument> subscribedInstruments = new ArrayList<>();
+    private static WarmupManager warmupManager;
+    private static LiveWebServer liveWebServer;
 
     public static void main(String[] args) {
         try {
@@ -72,12 +71,32 @@ public class Main {
             // Start live data service if enabled
             if (config.isLiveEnabled()) {
                 System.out.println("[" + new Date() + "] Starting live data service...");
-                liveDataManager = new LiveDataManager(config, history, subscribedInstruments);
-                liveDataManager.start();
 
-                liveWebServer = new LiveWebServer(liveDataManager, config.getLivePort());
+                // Create warmup manager
+                warmupManager = new WarmupManager(config, history, subscribedInstruments);
+
+                // Create WebSocket server (starts accepting connections immediately)
+                liveWebServer = new LiveWebServer(
+                        warmupManager.getInstrumentBuffers(),
+                        config.getLivePort()
+                );
                 liveWebServer.start();
-                System.out.println("[" + new Date() + "] Live data service started on port " + config.getLivePort());
+                System.out.println("[" + new Date() + "] WebSocket server started on port " + config.getLivePort());
+
+                // Perform warmup in background thread
+                Thread warmupThread = new Thread(() -> {
+                    try {
+                        System.out.println("[" + new Date() + "] Starting warmup...");
+                        warmupManager.performWarmup();
+                        liveWebServer.setWarming(false);
+                        System.out.println("[" + new Date() + "] Warmup complete, broadcasting started");
+                    } catch (Exception e) {
+                        System.err.println("[" + new Date() + "] Warmup failed: " + e.getMessage());
+                        e.printStackTrace();
+                    }
+                }, "Warmup-Thread");
+                warmupThread.setDaemon(true);
+                warmupThread.start();
             }
 
             // Historical download tasks
@@ -101,9 +120,6 @@ public class Main {
                 System.out.println("[" + new Date() + "] Shutting down...");
                 if (liveWebServer != null) {
                     liveWebServer.stop();
-                }
-                if (liveDataManager != null) {
-                    liveDataManager.shutdown();
                 }
             }, "ShutdownHook"));
 
@@ -161,9 +177,7 @@ public class Main {
         @Override
         public void onDisconnect() {
             System.err.println("[" + new Date() + "] Disconnected");
-            if (liveDataManager != null) {
-                liveDataManager.onDisconnect();
-            }
+            // TODO: Handle live data disconnect when implemented
         }
     }
 
@@ -195,9 +209,7 @@ public class Main {
 
         @Override
         public void onTick(com.dukascopy.api.Instrument instrument, com.dukascopy.api.ITick tick) {
-            if (liveDataManager != null) {
-                liveDataManager.onTick(instrument, tick);
-            }
+            // TODO: Handle ticks in live data service when implemented
         }
 
         @Override

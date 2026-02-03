@@ -7,8 +7,7 @@ public enum TimeframeType {
     S30(30),
     M1(60),
     M3(180),
-    M15(900),
-    H1(3600);
+    M15(900);
 
     private final int seconds;
 
@@ -28,7 +27,6 @@ public enum TimeframeType {
             case M1: return S30;
             case M3: return M1;
             case M15: return M3;
-            case H1: return M15;
             default: return null;
         }
     }
