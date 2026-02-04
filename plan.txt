@@ -317,3 +317,268 @@
   └─────────────────┘
 
 
+========================================================================================================================
+
+ok. the warmup sequence for live processing works fine. now we want to add live data processing functionality. for now we are interested in drafting specs, not implementation.
+we already have a ring buffer that holds the last lookback_window (default to 64) initialized during warmup procedure. 
+the live data processing starts after warmup is finished.  live data is fetched every second and this updates the ring buffer.
+
+the connection is atrocious so disconnections may happen and handling these is important.                                                                                                                                                                                                           
+
+there is an important point about connection loss. when connection is lost, the new seconds will be -1, not forward-filled from last valid point. higher timeframes 
+related to these -1 values will also be -1 obviously and these -1 values propagate upward. so when -1 values in S1 happen then new S5 values will become -1. new S10, 
+S30, and higher also will be -1. downstream apps have no use for incomplete data, so the websocket service should have a NaN existence flag in the buffer.
+on reconnection, app should fetch the missing data so that these -1 values are replaced with actual values. Any value below zero is invalid for midprice and spread
+so a simple check of value < 0 will handle the price being NaN (we use -1 instead of actual NaN to avoid compatibility issues with downstream apps).
+
+for holidays, weekends, and  new values should not be produced. so the first second is continued from 23:59:59 of the last open market day. closed market days other than 
+weekends (holidays and other close market days) can be identified by not having any tick between 00:00:00 and 02:00:00. so let's say we are in a close market day. if we have 
+no tick in the span of 00:00:00 and 02:00:00, then this is a close market day. so we will remove any data point we added for the current hour, essentially going back 
+to the buffer at the start of the day. it makes sense to copy a backup of the buffer in case we need to revert the changes. this makes the status of the day (open or close) 
+in the time span of 00:00:00 to 02:00:00 acceptable since no downstream app uses live data in that period. after 02 hour we definitely know if this is a close or open
+market day. so it makes sense to assume it is and open day unless we have no tick in the aforementioned period. in that case we could revert to the backup buffer ring 
+we took at the start of day. if the app startup was in the range of 00 to 02 hour, the situation may get complicated, so if the program startup is within this period,
+raise an error and quit the app, clearly stating that we should start the app after 02. 
+
+in the case of closed market day, we set a flag named closeMarketDay as true and do not fetch data for the whole day.  
+data retrieval will resume on 00:00:00 of the next day. so in essence at the start of the day the flag will become on if it is a weekend. otherwise it will become off. 
+at 02:00:00 if there was no tick from the start of the day, the flag will be set as on. when the flag is on, no attempt to fetch the data is performed.
+
+
+note: All timeframes have only mid price: (Ask + Bid) / 2.                                                                                                                      
+note: Any and all times are based on EET timezone.
+
+we are trying to perfect our specs. don't jump into implementation. 
+Ask any questions you feel right to better clarify the specs.
+
+===========================================================================================================================================
+
+● Live Data Processing Specification                                                                                                                                                                       
+
+  1. Overview                                                                                                                                                                                                 
+  Live data processing subscribes to Dukascopy's WebSocket tick stream, aggregates ticks per second, and updates the ring buffer. Broadcasting to downstream clients is handled by existing code—this spec 
+  covers only the ring buffer update logic.
+
+  2. Prerequisites
+
+  - Warmup procedure must complete successfully before live processing begins
+  - Ring buffer is initialized with lookback_window seconds (default: 64) of historical data
+  - App must NOT start between 00:00:00 and 02:00:00 EET (exit with error if attempted)
+
+  3. Market Hours
+  ┌─────────────────────┬──────────────────────────────────────┐
+  │         Day         │                Status                │
+  ├─────────────────────┼──────────────────────────────────────┤
+  │ Monday 00:00:00 EET │ Market opens                         │
+  ├─────────────────────┼──────────────────────────────────────┤
+  │ Friday 23:59:59 EET │ Market closes                        │
+  ├─────────────────────┼──────────────────────────────────────┤
+  │ Saturday            │ Closed                               │
+  ├─────────────────────┼──────────────────────────────────────┤
+  │ Sunday              │ Closed                               │
+  ├─────────────────────┼──────────────────────────────────────┤
+  │ Holidays            │ Detected dynamically (see Section 7) │
+  └─────────────────────┴──────────────────────────────────────┘
+  4. Data Flow
+
+  Dukascopy WebSocket Tick Stream
+              │
+              ▼
+      Tick Aggregator
+      (group by second, calculate mid & spread)
+              │
+              ▼
+      S1 Data Point
+      {timestamp, mid, spread}
+              │
+              ▼
+      Ring Buffer Update
+      (S1 inserted, higher timeframes recalculated)
+
+  4.1 Tick Aggregation
+
+  For each second:
+  - Collect all ticks received within that second
+  - Calculate: mid = (ask + bid) / 2 (averaged across ticks)
+  - Calculate: spread = ask - bid (averaged across ticks)
+  - If no ticks received for a second during market hours with active connection: forward-fill from previous second
+
+  4.2 Ring Buffer Update
+
+  At each second boundary:
+  1. Insert new S1 data point into ring buffer
+  2. Higher timeframes (S5, S10, S30, M1, etc.) are derived from S1 data in the buffer
+  3. If any S1 component of a higher timeframe is -1, that entire higher timeframe value becomes -1
+
+  5. State Variables
+  ┌─────────────────────┬────────────┬───────────────────────────────────────────────────┐
+  │      Variable       │    Type    │                    Description                    │
+  ├─────────────────────┼────────────┼───────────────────────────────────────────────────┤
+  │ closeMarketDay      │ boolean    │ True if today is a non-trading day                │
+  ├─────────────────────┼────────────┼───────────────────────────────────────────────────┤
+  │ connected           │ boolean    │ True if WebSocket connection is active            │
+  ├─────────────────────┼────────────┼───────────────────────────────────────────────────┤
+  │ lastValidTimestamp  │ timestamp  │ Last second with valid data                       │
+  ├─────────────────────┼────────────┼───────────────────────────────────────────────────┤
+  │ disconnectTimestamp │ timestamp  │ When connection was lost (null if connected)      │
+  ├─────────────────────┼────────────┼───────────────────────────────────────────────────┤
+  │ bufferBackup        │ RingBuffer │ Copy of ring buffer taken at 00:00:00 EET         │
+  ├─────────────────────┼────────────┼───────────────────────────────────────────────────┤
+  │ hasNaN              │ boolean    │ Global flag: true if any -1 exists in ring buffer │
+  └─────────────────────┴────────────┴───────────────────────────────────────────────────┘
+  6. Connection Management
+
+  6.1 Initial Connection (after warmup)
+
+  1. Subscribe to Dukascopy WebSocket tick stream for all configured instruments
+  2. Set connected = true
+  3. Begin tick aggregation and ring buffer updates
+
+  6.2 Disconnection Detected
+
+  When connection is lost:
+  1. Set connected = false
+  2. Record disconnectTimestamp = now
+  3. For each new second while disconnected:
+    - Insert -1 for mid and spread into ring buffer
+    - All affected higher timeframes become -1
+    - Set hasNaN = true
+  4. Attempt reconnection every second (never give up)
+
+  6.3 Reconnection
+
+  When connection is restored:
+  1. Calculate gap = now - disconnectTimestamp
+  2. If gap < 1 minute:
+    - Fetch missing seconds via historical API
+    - Replace -1 values in ring buffer with actual data
+    - Recalculate affected higher timeframes
+    - If all -1 values replaced: set hasNaN = false
+  3. If gap ≥ 1 minute:
+    - Perform full warmup procedure
+    - Resume live processing after warmup completes
+  4. Set connected = true
+  5. Clear disconnectTimestamp
+
+  7. Closed Market Day Handling
+
+  7.1 Daily Routine at 00:00:00 EET
+
+  At 00:00:00 EET each day:
+  │
+  ├─ Is Saturday or Sunday?
+  │   ├─ YES → Set closeMarketDay = true, skip data fetch for entire day
+  │   └─ NO  → Set closeMarketDay = false
+  │           Take bufferBackup = copy of current ring buffer
+  │           Begin normal data fetch
+
+  7.2 Holiday Detection at 02:00:00 EET
+
+  At 02:00:00 EET (if closeMarketDay == false):
+  │
+  ├─ Any ticks received since 00:00:00?
+  │   ├─ YES → Confirmed trading day, continue normal operation
+  │   └─ NO  → Holiday detected:
+  │            1. Restore ring buffer from bufferBackup
+  │            2. Set closeMarketDay = true
+  │            3. Stop data fetch for remainder of day
+
+  7.3 Resumption
+
+  - Data fetch resumes at 00:00:00 EET of the next day
+  - Process repeats from Section 7.1
+
+  8. Invalid Data Handling
+
+  8.1 Invalid Value Representation
+
+  - Invalid mid: -1
+  - Invalid spread: -1
+  - Check: value < 0 indicates invalid data
+
+  8.2 Propagation Rules
+  ┌────────────────────────┬──────────────────────────────────────────────────────┐
+  │        Scenario        │                        Result                        │
+  ├────────────────────────┼──────────────────────────────────────────────────────┤
+  │ S1 is -1               │ All higher timeframes containing this S1 become -1   │
+  ├────────────────────────┼──────────────────────────────────────────────────────┤
+  │ 1 of 5 S1 values is -1 │ Entire S5 is -1                                      │
+  ├────────────────────────┼──────────────────────────────────────────────────────┤
+  │ Connection lost        │ All new values are -1 until reconnected and repaired │
+  └────────────────────────┴──────────────────────────────────────────────────────┘
+  8.3 hasNaN Flag
+
+  - Set to true when any -1 value exists in ring buffer
+  - Set to false only when all -1 values are replaced with valid data
+  - Downstream clients can check this flag before consuming data
+
+  9. Edge Cases
+  ┌───────────────────────────────────────────┬─────────────────────────────────────────────────────────────────────────────────────────────┐
+  │                 Scenario                  │                                          Behavior                                           │
+  ├───────────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ App starts between 00:00-02:00 EET        │ Exit with error message: "Cannot start between 00:00 and 02:00 EET"                         │
+  ├───────────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Disconnection spans midnight              │ Handle day transition during reconnection; if new day is weekend, set closeMarketDay = true │
+  ├───────────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Disconnection during 00:00-02:00 period   │ On reconnection, if no ticks found for the day so far and time ≥ 02:00, treat as holiday    │
+  ├───────────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Connection never established after warmup │ Keep retrying every second; ring buffer continues to fill with -1                           │
+  ├───────────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Historical API fails during repair        │ Keep -1 values; set hasNaN = true; continue live processing                                 │
+  └───────────────────────────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────┘
+  10. Sequence Diagrams
+
+  10.1 Normal Operation
+
+  Time    Action
+  ─────   ──────────────────────────────────────
+  14:30:00.000  Second boundary reached
+  14:30:00.050  Aggregate ticks from 14:29:59
+  14:30:00.051  Insert S1 into ring buffer
+  14:30:00.052  Recalculate higher timeframes
+  14:30:00.053  Update hasNaN flag if needed
+          ...   (existing broadcast code sends to clients)
+  14:30:01.000  Next second boundary...
+
+  10.2 Disconnection and Recovery (<1 min)
+
+  Time        Action
+  ─────       ──────────────────────────────────────
+  14:30:00    Connection lost, disconnectTimestamp = 14:30:00
+  14:30:01    Insert -1, hasNaN = true, retry connection
+  14:30:02    Insert -1, retry connection
+  ...
+  14:30:45    Connection restored (gap = 45 seconds)
+  14:30:45    Fetch historical data for 14:30:00 - 14:30:44
+  14:30:45    Replace -1 values with actual data
+  14:30:45    Recalculate higher timeframes
+  14:30:45    hasNaN = false (if all repaired)
+  14:30:46    Resume normal operation
+
+  10.3 Disconnection and Recovery (≥1 min)
+
+  Time        Action
+  ─────       ──────────────────────────────────────
+  14:30:00    Connection lost
+  14:30:01    Insert -1, retry...
+  ...
+  14:35:00    Connection restored (gap = 5 minutes)
+  14:35:00    Initiate full warmup procedure
+  14:37:00    Warmup complete, ring buffer rebuilt
+  14:37:00    Resume live processing
+
+  11. Configuration Parameters
+  ┌────────────────────────┬──────────────┬────────────────────────────────────────────────────┐
+  │       Parameter        │   Default    │                    Description                     │
+  ├────────────────────────┼──────────────┼────────────────────────────────────────────────────┤
+  │ lookback_window        │ 64           │ Ring buffer size in seconds                        │
+  ├────────────────────────┼──────────────┼────────────────────────────────────────────────────┤
+  │ reconnect_interval     │ 1 second     │ Time between reconnection attempts                 │
+  ├────────────────────────┼──────────────┼────────────────────────────────────────────────────┤
+  │ repair_threshold       │ 60 seconds   │ Gap threshold: below = repair, above = full warmup │
+  ├────────────────────────┼──────────────┼────────────────────────────────────────────────────┤
+  │ holiday_detection_hour │ 02:00:00 EET │ Time to confirm holiday status                     │
+  └────────────────────────┴──────────────┴────────────────────────────────────────────────────┘
+  12. Open Items
+
+  1. Historical API for repair: Need to confirm Dukascopy API endpoint for fetching missed tick data (investigate JForex historical data methods)

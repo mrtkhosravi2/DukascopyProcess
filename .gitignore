@@ -1,4 +1,6 @@
 ./processed-data/
+plan.txt
+
 # Maven
 target/
 dependency-reduced-pom.xml

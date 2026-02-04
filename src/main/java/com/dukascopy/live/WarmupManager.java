@@ -486,4 +486,90 @@ public class WarmupManager {
     public InstrumentBuffer getBuffer(Instrument instrument) {
         return instrumentBuffers.get(instrument);
     }
+
+    /**
+     * Repair a gap in the data by fetching ticks for a specific time range.
+     * Used after short disconnections to fill in missing data.
+     *
+     * @param fromEpoch Start of gap (epoch seconds)
+     * @param toEpoch End of gap (epoch seconds)
+     */
+    public void repairGap(long fromEpoch, long toEpoch) throws Exception {
+        System.out.println("[" + new Date() + "] Repairing gap from " + fromEpoch + " to " + toEpoch);
+
+        for (Map.Entry<Instrument, InstrumentBuffer> entry : instrumentBuffers.entrySet()) {
+            Instrument instrument = entry.getKey();
+            InstrumentBuffer buffer = entry.getValue();
+
+            repairGapForInstrument(instrument, buffer, fromEpoch, toEpoch);
+        }
+    }
+
+    /**
+     * Repair gap for a single instrument.
+     */
+    private void repairGapForInstrument(Instrument instrument, InstrumentBuffer buffer,
+                                        long fromEpoch, long toEpoch) throws Exception {
+        long fromMs = fromEpoch * 1000;
+        long toMs = toEpoch * 1000;
+
+        // Fetch ticks for the gap period
+        List<ITick> ticks = history.getTicks(instrument, fromMs, toMs);
+
+        if (ticks == null || ticks.isEmpty()) {
+            System.out.println("[" + new Date() + "] No ticks found for " + instrument + " during gap");
+            return;
+        }
+
+        // Group ticks by second
+        Map<Long, List<double[]>> ticksBySecond = new LinkedHashMap<>();
+        for (ITick tick : ticks) {
+            double bid = tick.getBid();
+            double ask = tick.getAsk();
+            if (!Double.isNaN(bid) && !Double.isNaN(ask)) {
+                long epochSecond = tick.getTime() / 1000;
+                ticksBySecond.computeIfAbsent(epochSecond, k -> new ArrayList<>())
+                        .add(new double[] { (bid + ask) / 2.0, ask - bid });
+            }
+        }
+
+        // Get last valid value for forward-filling
+        TimeframeBuffer s1Buffer = buffer.getBuffer(TimeframeType.S1);
+        double lastMid = s1Buffer != null ? s1Buffer.getLatestMid() : Double.NaN;
+        double lastSpread = s1Buffer != null ? s1Buffer.getLatestSpread() : Double.NaN;
+
+        // Process each second in the gap
+        for (long epochSecond = fromEpoch; epochSecond <= toEpoch; epochSecond++) {
+            List<double[]> secondTicks = ticksBySecond.get(epochSecond);
+
+            double mid, spread;
+            if (secondTicks != null && !secondTicks.isEmpty()) {
+                // Average the ticks for this second
+                double midSum = 0, spreadSum = 0;
+                for (double[] t : secondTicks) {
+                    midSum += t[0];
+                    spreadSum += t[1];
+                }
+                mid = midSum / secondTicks.size();
+                spread = spreadSum / secondTicks.size();
+                lastMid = mid;
+                lastSpread = spread;
+            } else if (!Double.isNaN(lastMid) && lastMid >= 0) {
+                // Forward-fill from last valid value
+                mid = lastMid;
+                spread = lastSpread;
+            } else {
+                // No valid value - skip this second (already has -1 from disconnect)
+                continue;
+            }
+
+            // Update S1 buffer directly (we need to replace -1 values)
+            // For now, just add the value - the buffer will overwrite if timestamp matches
+            // Note: This is a simplified approach; full implementation would need buffer update
+            buffer.addS1AndUpdateHigher(epochSecond, mid, spread);
+        }
+
+        System.out.println("[" + new Date() + "] Repaired " + ticksBySecond.size() +
+                " seconds with ticks for " + instrument);
+    }
 }

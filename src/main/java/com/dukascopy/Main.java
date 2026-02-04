@@ -6,6 +6,7 @@ import com.dukascopy.api.Instrument;
 import com.dukascopy.api.system.IClient;
 import com.dukascopy.api.system.ClientFactory;
 import com.dukascopy.api.system.ISystemListener;
+import com.dukascopy.live.LiveDataProcessor;
 import com.dukascopy.live.LiveWebServer;
 import com.dukascopy.live.WarmupManager;
 
@@ -24,6 +25,7 @@ public class Main {
     private static List<Instrument> subscribedInstruments = new ArrayList<>();
     private static WarmupManager warmupManager;
     private static LiveWebServer liveWebServer;
+    private static LiveDataProcessor liveDataProcessor;
 
     public static void main(String[] args) {
         try {
@@ -70,6 +72,16 @@ public class Main {
 
             // Start live data service if enabled
             if (config.isLiveEnabled()) {
+                // Check startup time - exit if between 00:00 and 02:00 EET
+                // This avoids issues with midnight transitions and holiday detection
+                Calendar cal = Calendar.getInstance(TimeZone.getTimeZone("EET"));
+                int hour = cal.get(Calendar.HOUR_OF_DAY);
+                if (hour >= 0 && hour < 2) {
+                    System.err.println("[" + new Date() + "] Cannot start live data service between 00:00 and 02:00 EET");
+                    System.err.println("[" + new Date() + "] Please restart after 02:00 EET");
+                    System.exit(1);
+                }
+
                 System.out.println("[" + new Date() + "] Starting live data service...");
 
                 // Create warmup manager
@@ -83,13 +95,22 @@ public class Main {
                 liveWebServer.start();
                 System.out.println("[" + new Date() + "] WebSocket server started on port " + config.getLivePort());
 
-                // Perform warmup in background thread
+                // Perform warmup in background thread, then start live processing
                 Thread warmupThread = new Thread(() -> {
                     try {
                         System.out.println("[" + new Date() + "] Starting warmup...");
                         warmupManager.performWarmup();
+                        System.out.println("[" + new Date() + "] Warmup complete");
+
+                        // Create and start live data processor
+                        liveDataProcessor = new LiveDataProcessor(warmupManager);
+                        liveDataProcessor.start();
+
+                        // Update WebSocket server with processor reference
+                        liveWebServer.setLiveDataProcessor(liveDataProcessor);
                         liveWebServer.setWarming(false);
-                        System.out.println("[" + new Date() + "] Warmup complete, broadcasting started");
+
+                        System.out.println("[" + new Date() + "] Live data processing started");
                     } catch (Exception e) {
                         System.err.println("[" + new Date() + "] Warmup failed: " + e.getMessage());
                         e.printStackTrace();
@@ -118,6 +139,9 @@ public class Main {
             // Add shutdown hook
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 System.out.println("[" + new Date() + "] Shutting down...");
+                if (liveDataProcessor != null) {
+                    liveDataProcessor.stop();
+                }
                 if (liveWebServer != null) {
                     liveWebServer.stop();
                 }
@@ -172,12 +196,17 @@ public class Main {
         @Override
         public void onConnect() {
             System.out.println("[" + new Date() + "] Connected");
+            if (liveDataProcessor != null) {
+                liveDataProcessor.onReconnect();
+            }
         }
 
         @Override
         public void onDisconnect() {
             System.err.println("[" + new Date() + "] Disconnected");
-            // TODO: Handle live data disconnect when implemented
+            if (liveDataProcessor != null) {
+                liveDataProcessor.onDisconnect();
+            }
         }
     }
 
@@ -209,7 +238,9 @@ public class Main {
 
         @Override
         public void onTick(com.dukascopy.api.Instrument instrument, com.dukascopy.api.ITick tick) {
-            // TODO: Handle ticks in live data service when implemented
+            if (liveDataProcessor != null) {
+                liveDataProcessor.processTick(instrument, tick);
+            }
         }
 
         @Override

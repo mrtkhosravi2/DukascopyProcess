@@ -139,4 +139,42 @@ public class RingBuffer {
     public boolean isFull() {
         return size == capacity;
     }
+
+    /**
+     * Create a deep copy of this ring buffer.
+     */
+    public RingBuffer copy() {
+        RingBuffer copy = new RingBuffer(capacity);
+        System.arraycopy(this.values, 0, copy.values, 0, capacity);
+        System.arraycopy(this.timestamps, 0, copy.timestamps, 0, capacity);
+        copy.head = this.head;
+        copy.size = this.size;
+        return copy;
+    }
+
+    /**
+     * Restore state from another ring buffer.
+     */
+    public void copyFrom(RingBuffer other) {
+        if (other.capacity != this.capacity) {
+            throw new IllegalArgumentException("Cannot copy from buffer with different capacity");
+        }
+        System.arraycopy(other.values, 0, this.values, 0, capacity);
+        System.arraycopy(other.timestamps, 0, this.timestamps, 0, capacity);
+        this.head = other.head;
+        this.size = other.size;
+    }
+
+    /**
+     * Check if buffer contains any negative values (used to detect -1 disconnect markers).
+     */
+    public boolean containsNegative() {
+        for (int i = 0; i < size; i++) {
+            int idx = (head - size + i + capacity) % capacity;
+            if (values[idx] < 0) {
+                return true;
+            }
+        }
+        return false;
+    }
 }

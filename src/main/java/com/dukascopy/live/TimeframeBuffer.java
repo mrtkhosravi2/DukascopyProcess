@@ -98,4 +98,43 @@ public class TimeframeBuffer {
             spreadBuffer.clear();
         }
     }
+
+    /**
+     * Create a deep copy of this timeframe buffer.
+     */
+    public TimeframeBuffer copy() {
+        TimeframeBuffer copy = new TimeframeBuffer(timeframe, capacity);
+        copy.midBuffer.copyFrom(this.midBuffer);
+        if (this.spreadBuffer != null && copy.spreadBuffer != null) {
+            copy.spreadBuffer.copyFrom(this.spreadBuffer);
+        }
+        return copy;
+    }
+
+    /**
+     * Restore state from another timeframe buffer.
+     */
+    public void copyFrom(TimeframeBuffer other) {
+        if (other.timeframe != this.timeframe) {
+            throw new IllegalArgumentException("Cannot copy from buffer with different timeframe");
+        }
+        this.midBuffer.copyFrom(other.midBuffer);
+        if (this.spreadBuffer != null && other.spreadBuffer != null) {
+            this.spreadBuffer.copyFrom(other.spreadBuffer);
+        }
+    }
+
+    /**
+     * Get the mid buffer (for internal access).
+     */
+    RingBuffer getMidBuffer() {
+        return midBuffer;
+    }
+
+    /**
+     * Get the spread buffer (for internal access, S1 only).
+     */
+    RingBuffer getSpreadBuffer() {
+        return spreadBuffer;
+    }
 }

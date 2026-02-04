@@ -37,10 +37,18 @@ public class LiveWebServer {
     private ScheduledExecutorService broadcastScheduler;
 
     private final AtomicBoolean warming = new AtomicBoolean(true);
+    private LiveDataProcessor liveDataProcessor;
 
     public LiveWebServer(Map<Instrument, InstrumentBuffer> instrumentBuffers, int port) {
         this.instrumentBuffers = instrumentBuffers;
         this.port = port;
+    }
+
+    /**
+     * Set the live data processor for state information.
+     */
+    public void setLiveDataProcessor(LiveDataProcessor processor) {
+        this.liveDataProcessor = processor;
     }
 
     /**
@@ -167,6 +175,10 @@ public class LiveWebServer {
         List<WebSocketClient> disconnected = new ArrayList<>();
 
         for (WebSocketClient client : clients) {
+            if (client.isClosed()) {
+                disconnected.add(client);
+                continue;
+            }
             try {
                 client.send(frame);
             } catch (IOException e) {
@@ -189,6 +201,17 @@ public class LiveWebServer {
 
         snapshot.put("warming", warming.get());
         snapshot.put("ts", formatTimestamp(System.currentTimeMillis()));
+
+        // Add live data processor state
+        if (liveDataProcessor != null) {
+            snapshot.put("connected", liveDataProcessor.isConnected());
+            snapshot.put("hasNaN", liveDataProcessor.hasNaN());
+            snapshot.put("closeMarketDay", liveDataProcessor.isCloseMarketDay());
+        } else {
+            snapshot.put("connected", false);
+            snapshot.put("hasNaN", false);
+            snapshot.put("closeMarketDay", false);
+        }
 
         Map<String, Object> instruments = new LinkedHashMap<>();
         for (Map.Entry<Instrument, InstrumentBuffer> entry : instrumentBuffers.entrySet()) {
@@ -385,21 +408,165 @@ public class LiveWebServer {
         return clients.size();
     }
 
-    private static class WebSocketClient {
+    private class WebSocketClient {
         private final Socket socket;
+        private final InputStream in;
         private final OutputStream out;
+        private volatile boolean closed = false;
+        private final Thread readerThread;
 
         WebSocketClient(Socket socket) throws IOException {
             this.socket = socket;
+            this.in = socket.getInputStream();
             this.out = socket.getOutputStream();
+
+            // Start reader thread to handle incoming frames
+            this.readerThread = new Thread(this::readFrames, "WebSocket-Reader");
+            this.readerThread.setDaemon(true);
+            this.readerThread.start();
+        }
+
+        private void readFrames() {
+            try {
+                while (!closed && !socket.isClosed()) {
+                    int firstByte = in.read();
+                    if (firstByte == -1) {
+                        break;  // Connection closed
+                    }
+
+                    int secondByte = in.read();
+                    if (secondByte == -1) {
+                        break;
+                    }
+
+                    int opcode = firstByte & 0x0F;
+                    boolean masked = (secondByte & 0x80) != 0;
+                    int payloadLen = secondByte & 0x7F;
+
+                    // Read extended payload length if needed
+                    if (payloadLen == 126) {
+                        int b1 = in.read();
+                        int b2 = in.read();
+                        if (b1 == -1 || b2 == -1) break;
+                        payloadLen = (b1 << 8) | b2;
+                    } else if (payloadLen == 127) {
+                        // 8-byte length - read and use lower 4 bytes
+                        long len = 0;
+                        for (int i = 0; i < 8; i++) {
+                            int b = in.read();
+                            if (b == -1) break;
+                            len = (len << 8) | b;
+                        }
+                        payloadLen = (int) len;
+                    }
+
+                    // Read masking key if present
+                    byte[] maskKey = null;
+                    if (masked) {
+                        maskKey = new byte[4];
+                        int read = 0;
+                        while (read < 4) {
+                            int r = in.read(maskKey, read, 4 - read);
+                            if (r == -1) break;
+                            read += r;
+                        }
+                        if (read < 4) break;
+                    }
+
+                    // Read payload
+                    byte[] payload = new byte[payloadLen];
+                    if (payloadLen > 0) {
+                        int read = 0;
+                        while (read < payloadLen) {
+                            int r = in.read(payload, read, payloadLen - read);
+                            if (r == -1) break;
+                            read += r;
+                        }
+                        if (read < payloadLen) break;
+
+                        // Unmask if needed
+                        if (masked && maskKey != null) {
+                            for (int i = 0; i < payloadLen; i++) {
+                                payload[i] ^= maskKey[i % 4];
+                            }
+                        }
+                    }
+
+                    // Handle frame by opcode
+                    switch (opcode) {
+                        case 0x8:  // Close frame
+                            // Send close frame back
+                            sendCloseFrame();
+                            closed = true;
+                            break;
+                        case 0x9:  // Ping frame
+                            // Send pong frame with same payload
+                            sendPongFrame(payload);
+                            break;
+                        case 0xA:  // Pong frame
+                            // Ignore pong frames
+                            break;
+                        default:
+                            // Ignore other frames (text, binary, etc.)
+                            break;
+                    }
+                }
+            } catch (IOException e) {
+                // Connection error - will be handled by send() failure
+            } finally {
+                closed = true;
+                // Remove from clients list
+                clients.remove(this);
+                try {
+                    socket.close();
+                } catch (IOException ignored) {
+                }
+            }
+        }
+
+        private void sendCloseFrame() {
+            try {
+                synchronized (this) {
+                    out.write(new byte[] { (byte) 0x88, 0x00 });  // Close frame with no payload
+                    out.flush();
+                }
+            } catch (IOException ignored) {
+            }
+        }
+
+        private void sendPongFrame(byte[] payload) {
+            try {
+                synchronized (this) {
+                    if (payload.length < 126) {
+                        out.write(new byte[] { (byte) 0x8A, (byte) payload.length });
+                    } else {
+                        out.write(new byte[] { (byte) 0x8A, (byte) 126,
+                                (byte) ((payload.length >> 8) & 0xFF),
+                                (byte) (payload.length & 0xFF) });
+                    }
+                    if (payload.length > 0) {
+                        out.write(payload);
+                    }
+                    out.flush();
+                }
+            } catch (IOException ignored) {
+            }
         }
 
         synchronized void send(byte[] data) throws IOException {
+            if (closed) {
+                throw new IOException("Client closed");
+            }
             out.write(data);
             out.flush();
         }
 
+        boolean isClosed() {
+            return closed;
+        }
+
         void close() {
+            closed = true;
             try {
                 socket.close();
             } catch (IOException ignored) {

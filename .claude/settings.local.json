@@ -12,7 +12,8 @@
       "Bash(git -C \"D:\\\\Github\\\\DukascopyProcess\" commit -m \"$\\(cat <<''EOF''\nAdd CLAUDE.md for Claude Code guidance\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
       "Bash(git -C \"D:\\\\Github\\\\DukascopyProcess\" status)",
       "Bash(git -C \"D:/Github/DukascopyProcess\" diff src/main/java/com/dukascopy/TickAggregator.java)",
-      "Bash(mvn compile:*)"
+      "Bash(mvn compile:*)",
+      "Bash(mvn clean package:*)"
     ]
   }
 }
